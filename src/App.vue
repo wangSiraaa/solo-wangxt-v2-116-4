@@ -165,12 +165,22 @@
         </section>
       </aside>
     </main>
+
+    <MarkMergeDialog
+      :preview="mergePreview"
+      :measures="score?.measures ?? []"
+      :arrivals="path?.arrivals ?? []"
+      :current-marks="project?.marks ?? []"
+      @cancel="cancelMarkImport"
+      @confirm="confirmMarkMerge"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ScoreView from './components/ScoreView.vue'
+import MarkMergeDialog from './components/MarkMergeDialog.vue'
 import { buildBeatEvents, Metronome, type BeatEvent } from './audio/metronome'
 import {
   createProject,
@@ -182,6 +192,13 @@ import {
   saveProject,
 } from './storage/projects'
 import { arrivalsFor, buildPerformancePath, formatTime, parseMusicXml, type ParsedScore } from './score/parser'
+import {
+  assertSameOriginalXml,
+  assertMarksOnPath,
+  createMarkMergePreview,
+  ProjectXmlMismatchError,
+  type MarkMergePreview,
+} from './score/markMerge'
 import { sampleLibrary } from './score/samples'
 import type { RehearsalMark, StoredProject } from './score/types'
 
@@ -197,6 +214,8 @@ const playing = ref(false)
 const markLabel = ref('')
 const markComment = ref('')
 const beatEvents = ref<BeatEvent[]>([])
+const mergePreview = ref<MarkMergePreview | null>(null)
+let pendingImportedProject: StoredProject | null = null
 let metronome: Metronome | null = null
 let rafHandle = 0
 
@@ -263,14 +282,51 @@ async function onProjectImport(event: Event): Promise<void> {
   if (!file) return
   try {
     const imported = await importProjectFile(file)
-    await saveProject(imported)
-    await refreshProjectList()
-    loadStoredProject(imported)
+
+    if (!project.value) {
+      await saveProject(imported)
+      await refreshProjectList()
+      loadStoredProject(imported)
+      return
+    }
+
+    if (!score.value || !path.value) {
+      window.alert('当前乐谱尚未完成解析，暂时不能合并标记。')
+      return
+    }
+
+    try {
+      assertSameOriginalXml(project.value, imported)
+    } catch (error) {
+      if (error instanceof ProjectXmlMismatchError) {
+        window.alert(error.message)
+        return
+      }
+      throw error
+    }
+
+    assertMarksOnPath(imported.marks, path.value)
+
+    pendingImportedProject = imported
+    mergePreview.value = createMarkMergePreview(project.value, imported)
   } catch (error) {
     window.alert(error instanceof Error ? error.message : '工程导入失败')
   } finally {
     input.value = ''
   }
+}
+
+function cancelMarkImport(): void {
+  mergePreview.value = null
+  pendingImportedProject = null
+}
+
+async function confirmMarkMerge(marks: RehearsalMark[]): Promise<void> {
+  if (!project.value || !pendingImportedProject) return
+  project.value.marks = marks
+  mergePreview.value = null
+  pendingImportedProject = null
+  await saveCurrentProject()
 }
 
 function downloadOriginalXml(): void {
