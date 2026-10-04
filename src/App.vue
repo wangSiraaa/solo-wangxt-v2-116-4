@@ -96,7 +96,6 @@
           </div>
         </div>
       </section>
-
       <aside class="sidebar right">
         <section class="panel">
           <h2>选定书面小节的实际到达</h2>
@@ -165,13 +164,24 @@
         </section>
       </aside>
     </main>
+
+    <MarkMergeDialog
+      v-if="mergeState"
+      :plan="mergeState.plan"
+      :project-name="mergeState.name"
+      :measures="score?.measures ?? []"
+      :path="path"
+      @cancel="mergeState = null"
+      @confirm="applyMarkMerge"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import ScoreView from './components/ScoreView.vue'
-import { buildBeatEvents, Metronome, type BeatEvent } from './audio/metronome'
+import MarkMergeDialog from './components/MarkMergeDialog.vue'
+import { Metronome, buildBeatEvents, type BeatEvent } from './audio/metronome'
 import {
   createProject,
   deleteProject,
@@ -182,6 +192,7 @@ import {
   saveProject,
 } from './storage/projects'
 import { arrivalsFor, buildPerformancePath, formatTime, parseMusicXml, type ParsedScore } from './score/parser'
+import { buildMarkMergePlan, mergeMarks, type ConflictResolution, type MarkMergePlan } from './score/markMerge'
 import { sampleLibrary } from './score/samples'
 import type { RehearsalMark, StoredProject } from './score/types'
 
@@ -197,6 +208,7 @@ const playing = ref(false)
 const markLabel = ref('')
 const markComment = ref('')
 const beatEvents = ref<BeatEvent[]>([])
+const mergeState = ref<{ name: string; plan: MarkMergePlan } | null>(null)
 let metronome: Metronome | null = null
 let rafHandle = 0
 
@@ -263,6 +275,19 @@ async function onProjectImport(event: Event): Promise<void> {
   if (!file) return
   try {
     const imported = await importProjectFile(file)
+
+    // 当前已打开工程时，导入是“预览并合并标记”流程：
+    // 只有原始 XML 逐字相同才允许合并，XML 不同的工程包不能覆盖当前工程。
+    if (project.value) {
+      if (imported.originalXml !== project.value.originalXml) {
+        window.alert('该工程包的原始 MusicXML 与当前工程不完全相同，不能合并或覆盖当前工程。请先另存或新建工程后再打开它。')
+        return
+      }
+      const plan = buildMarkMergePlan(project.value.marks, imported.marks)
+      mergeState.value = { name: imported.name, plan }
+      return
+    }
+
     await saveProject(imported)
     await refreshProjectList()
     loadStoredProject(imported)
@@ -270,6 +295,17 @@ async function onProjectImport(event: Event): Promise<void> {
     window.alert(error instanceof Error ? error.message : '工程导入失败')
   } finally {
     input.value = ''
+  }
+}
+
+async function applyMarkMerge(resolutions: Record<string, ConflictResolution>): Promise<void> {
+  if (!project.value || !mergeState.value) return
+  try {
+    project.value.marks = mergeMarks(project.value.marks, mergeState.value.plan, resolutions)
+    mergeState.value = null
+    await saveCurrentProject()
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : '合并失败')
   }
 }
 
